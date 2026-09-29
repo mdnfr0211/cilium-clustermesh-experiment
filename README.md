@@ -80,6 +80,39 @@ Envoy-based proxies for HTTP, gRPC, DNS, Gateway API, and ingress features
 that require L7 parsing. The distinction is that ordinary pod-to-pod and
 Service traffic does not require a sidecar in every application pod.
 
+### The precise difference from Istio, App Mesh, and ECS Service Connect
+
+The useful comparison is not simply “Cilium has no proxy.” Cilium has a
+different **default datapath and control-plane distribution model** for
+service-to-service traffic.
+
+| Concern | Istio on EKS / AWS App Mesh | ECS Service Connect | Cilium ClusterMesh in this lab |
+| --- | --- | --- | --- |
+| Client traffic path | Traffic is intercepted and sent through an Envoy proxy associated with the workload. | The application connects to the Service Connect proxy sidecar in its own ECS task. | The application connects to a normal Kubernetes Service; Cilium's eBPF datapath performs L3/L4 lookup and backend selection on the node. |
+| Where a client chooses a backend | The Envoy proxy receives endpoint/configuration updates from the mesh control plane and chooses a backend. | The local Service Connect proxy uses ECS/Cloud Map service configuration and selects a task, normally round-robin. | Cilium programs Service and endpoint state into eBPF maps on the node; the datapath selects a local or remote pod backend. |
+| Per-workload proxy | Usually yes for sidecar mode. Istio also has Ambient mode, which changes that deployment model. | Yes: ECS adds the managed proxy container to every participating task. | No for ordinary L3/L4 pod-to-pod traffic. Cilium agents run per node, not beside every application container. |
+| Cross-cluster state | A mesh control plane distributes configuration to the participating proxies. | Service Connect can connect services across VPCs, but each participating task still has its proxy. | KVStoreMesh synchronizes remote nodes, identities, and endpoints to each cluster's local ClusterMesh state; Cilium agents consume that state. |
+| Application-layer features | Strong L7 traffic management, retries, timeouts, circuit breaking, request routing, and workload mTLS are core proxy capabilities. | Managed service discovery, retries, metrics, and proxy-based traffic routing. | This lab provides L3/L4 load-balancing, policy, node-to-node WireGuard, and multi-cluster discovery. L7 features require explicitly using Cilium's Envoy-based capabilities. |
+| Workload mTLS | Commonly implemented as mutual TLS between workload proxies. | Available through Service Connect's proxy features where configured. | Not enabled by this lab. WireGuard encrypts node-to-node transport; ClusterMesh etcd uses its own mTLS. |
+
+So your statement is fundamentally right: in Istio sidecar mode, App Mesh, and
+ECS Service Connect, a client-local proxy receives destination information and
+participates in round-robin/routing decisions. In this Cilium design, that
+L3/L4 decision is made by eBPF on the node from Cilium's locally synchronized
+Service and endpoint maps. The application pod does not carry a proxy.
+
+The trade-off is equally important: Cilium ClusterMesh alone is **not** a
+drop-in replacement for all application-level Istio or Service Connect
+features. Use it when the goal is efficient, sidecarless network connectivity,
+security enforcement, and cross-cluster service discovery. Add Cilium's L7
+features or another dedicated solution when you need request-aware retries,
+weighted traffic shifting, application mTLS, or other L7 mesh behavior.
+
+AWS App Mesh is included here as an architectural comparison to an Envoy
+sidecar mesh. AWS has announced that App Mesh support ends on September 30,
+2026; new ECS designs should evaluate Service Connect or another supported
+mesh approach instead.
+
 ### Consolidate the network datapath
 
 Cilium can provide the CNI, kube-proxy replacement, NetworkPolicy,
@@ -227,4 +260,6 @@ terraform -chdir=terraform destroy
 - [Cilium Global Services](https://docs.cilium.io/en/stable/network/clustermesh/global-services/)
 - [Cilium transparent WireGuard encryption](https://docs.cilium.io/en/stable/security/network/encryption-wireguard/)
 - [Cilium Service Mesh](https://docs.cilium.io/en/stable/network/servicemesh/)
+- [Amazon ECS Service Connect components](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-connect-concepts-deploy.html)
+- [AWS App Mesh end-of-support notice](https://docs.aws.amazon.com/app-mesh/latest/userguide/doc-history.html)
 - [Significant troubleshooting record](docs/TROUBLESHOOTING-LOG.md)
