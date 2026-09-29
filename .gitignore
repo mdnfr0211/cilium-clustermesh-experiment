@@ -1,0 +1,19 @@
+# Terraform working state and local overrides
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Keep dependency locks under version control.
+!.terraform.lock.hcl
+
+# Local editor and operating-system files
+.DS_Store
+.idea/
+.vscode/

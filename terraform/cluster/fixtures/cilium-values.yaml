@@ -1,0 +1,73 @@
+kubeProxyReplacement: true
+
+bpf:
+  lbExternalClusterIP: true
+
+routingMode: tunnel
+tunnelProtocol: vxlan
+
+ipam:
+  mode: cluster-pool
+  operator: {}
+
+cluster:
+  id: 0
+  name: ""
+
+clustermesh:
+  useAPIServer: true
+  apiserver:
+    tls:
+      auto:
+        method: helm
+    service:
+      # Terraform owns the Service so it can wait for the NLB hostname and
+      # supply it directly to the private Route53 module.
+      externallyCreated: true
+  config:
+    enabled: true
+    clusters: {}
+
+dnsProxy:
+  enabled: true
+
+ingressController:
+  enabled: false
+  default: true
+
+gatewayAPI:
+  enabled: true
+
+enableEnvoyConfig: true
+
+encryption:
+  enabled: true
+  type: wireguard
+  nodeEncryption: true
+
+bandwidthManager:
+  enabled: true
+  bbr: true
+
+hubble:
+  relay:
+    enabled: true
+  ui:
+    enabled: true
+  metrics:
+    enabled:
+      - dns
+      - drop
+      - tcp
+      - flow
+      - port-distribution
+      - http
+      - icmp
+
+operator:
+  replicas: 1
+
+nodeSelectorLabels: true
+
+tolerations:
+  - operator: Exists
