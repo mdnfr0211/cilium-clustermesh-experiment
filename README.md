@@ -140,6 +140,59 @@ The root Terraform module owns shared infrastructure: the lab CA, VPC
 peering, routes, and private hosted zone. Both clusters are instances of the
 reusable [`terraform/cluster`](terraform/cluster) module.
 
+## Architecture
+
+```mermaid
+flowchart TB
+  TF[Terraform root module]
+  CA[Shared ClusterMesh CA]
+  DNS[Route53 private zone<br/>mesh.cilium.io]
+
+  TF --> CA
+  TF --> DNS
+
+  subgraph VPC1[Cluster-1 VPC 10.0.0.0/16]
+    direction TB
+    NLB1[Internal NLB<br/>TCP 2379]
+    subgraph EKS1[cluster-1 EKS]
+      CM1[ClusterMesh state sync<br/>and API server]
+      BPF1[Cilium eBPF datapath<br/>Service and policy maps]
+      POD1[mesh-client pod]
+    end
+    NLB1 --> CM1
+    POD1 -->|nginx.test-mesh.svc.cluster.local| BPF1
+  end
+
+  subgraph VPC2[Cluster-2 VPC 10.1.0.0/16]
+    direction TB
+    NLB2[Internal NLB<br/>TCP 2379]
+    subgraph EKS2[cluster-2 EKS]
+      CM2[ClusterMesh state sync<br/>and API server]
+      BPF2[Cilium eBPF datapath<br/>Service and policy maps]
+      POD2[nginx pod]
+    end
+    NLB2 --> CM2
+    BPF2 --> POD2
+  end
+
+  CA --> CM1
+  CA --> CM2
+  DNS -->|cluster-1.mesh.cilium.io| NLB1
+  DNS -->|cluster-2.mesh.cilium.io| NLB2
+
+  CM1 -->|mTLS state sync<br/>via cluster-2 NLB| NLB2
+  CM2 -->|mTLS state sync<br/>via cluster-1 NLB| NLB1
+  BPF1 -->|direct application traffic<br/>VXLAN + WireGuard| BPF2
+```
+
+The diagram shows the deliberate split between the two runtime paths:
+
+- **ClusterMesh control plane:** private DNS, internal NLBs, TCP/2379, and
+  mutual TLS synchronize remote identities, nodes, and endpoints.
+- **Application data plane:** Cilium's eBPF datapath sends ordinary service
+  traffic directly between nodes through VXLAN and WireGuard. The NLB is never
+  part of the application request path.
+
 ## How ClusterMesh works here
 
 ClusterMesh has two separate traffic paths. Keeping them distinct is crucial.
