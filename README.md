@@ -113,4 +113,3 @@ client private keys.
 
 - [ClusterMesh setup](https://docs.cilium.io/en/stable/network/clustermesh/setup/)
 - [Global Service affinity](https://docs.cilium.io/en/stable/network/clustermesh/affinity/)
-- [Investigation notes](docs/INVESTIGATION-clustermesh-sync.md)
