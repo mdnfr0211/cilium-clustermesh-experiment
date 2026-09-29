@@ -14,7 +14,7 @@ sidecar in every application pod.
 The AWS VPC CNI normally assigns pod addresses from the VPC. That is simple,
 but large or dense clusters can consume VPC secondary IP capacity quickly.
 
-This lab uses Cilium cluster-pool IPAM and VXLAN. Nodes keep their VPC
+The configuration uses Cilium cluster-pool IPAM and VXLAN. Nodes keep their VPC
 addresses, while pods use Cilium-managed ranges:
 
 | Cluster | VPC CIDR | Pod CIDR |
@@ -35,7 +35,7 @@ chains grow too and their update and debugging model becomes part of normal
 operations.
 
 Cilium attaches eBPF programs to the Linux datapath. With
-`kubeProxyReplacement: true`, this lab uses Cilium for Service
+`kubeProxyReplacement: true`, the configuration uses Cilium for Service
 load-balancing, policy enforcement, and flow visibility instead of using
 kube-proxy's iptables rules. eBPF is not a blanket performance guarantee for
 every workload; it is an architectural change that removes iptables as the
@@ -85,23 +85,23 @@ Service traffic does not require a sidecar in every application pod.
 The useful comparison is not “proxy versus no proxy.” These tools overlap, but
 they start at different layers and make different default trade-offs:
 
-| Concern | Istio | Consul service mesh | Cilium + ClusterMesh in this lab |
+| Concern | Istio | Consul service mesh | Cilium + ClusterMesh in this configuration |
 | --- | --- | --- | --- |
 | Primary role | A service mesh focused on secure, observable, and programmable service-to-service traffic. | Service discovery plus a service mesh that works across Kubernetes, VMs, and other runtimes. | A CNI and eBPF networking/security datapath; ClusterMesh extends its L3/L4 connectivity and Services across Kubernetes clusters. |
 | Default data plane | Either an Envoy sidecar beside each workload or Istio Ambient: a per-node L4 `ztunnel` plus optional L7 waypoint proxies. | Usually an Envoy sidecar beside each service. Consul dataplane can remove client agents, but it still manages a local proxy for the workload. | The Cilium agent runs per node. Ordinary pod and Kubernetes Service traffic is handled by eBPF; no proxy is injected into application pods. |
 | Traffic interception | Sidecar mode intercepts workload traffic through Envoy. Ambient moves the L4 hop to the node and adds a waypoint only for L7 needs. | Transparent proxy mode uses iptables to redirect inbound and outbound traffic through the sidecar Envoy. | With kube-proxy replacement, eBPF handles Service translation, load-balancing, and policy in the kernel datapath instead of kube-proxy iptables chains. |
 | Where endpoint state lives | Istiod discovers services, creates xDS configuration, and dynamically programs the Envoy proxies. | The Consul catalog/control plane provides Envoy xDS configuration, including upstream discovery, certificates, intentions, and L7 settings. | Kubernetes state plus KVStoreMesh remote state is programmed into each node's Cilium agent and its eBPF Service/endpoint maps. |
 | Who selects the backend | The local Envoy/ztunnel/waypoint, depending on Istio data-plane mode and feature used. | The local Envoy proxy chooses a healthy upstream backend. | The node eBPF datapath selects the local or remote pod backend for ordinary L3/L4 Service traffic. |
-| mTLS and authorization | Workload mTLS, identities, and authorization are core mesh features. | Workload mTLS is core: Consul issues or integrates certificates and Envoy enforces service intentions. | This lab enables WireGuard **node-to-node** encryption and Cilium network policy. It does not enable workload application mTLS. ClusterMesh etcd has separate mTLS. |
-| L7 traffic management | Rich request-aware routing, retries, timeouts, fault injection, traffic splitting, and telemetry. | Envoy-based HTTP/gRPC routing, L7 intentions, timeouts, and traffic-management configuration. | Possible through Cilium's Envoy-based L7, Gateway API, and ingress features, but not supplied by ClusterMesh itself or configured in this lab. |
+| mTLS and authorization | Workload mTLS, identities, and authorization are core mesh features. | Workload mTLS is core: Consul issues or integrates certificates and Envoy enforces service intentions. | The configuration enables WireGuard **node-to-node** encryption and Cilium network policy. It does not enable workload application mTLS. ClusterMesh etcd has separate mTLS. |
+| L7 traffic management | Rich request-aware routing, retries, timeouts, fault injection, traffic splitting, and telemetry. | Envoy-based HTTP/gRPC routing, L7 intentions, timeouts, and traffic-management configuration. | Possible through Cilium's Envoy-based L7, Gateway API, and ingress features, but not supplied by ClusterMesh itself or enabled in this configuration. |
 | Multi-cluster model | Multiple control-plane and topology models; proxies receive remote service configuration. | Cluster peering or WAN federation, usually with mesh gateways for cross-network service traffic. | Direct remote pod connectivity, cluster-aware policy, and global Service backend sharing after KVStoreMesh syncs state. |
 | Main operational cost | Proxy resources and lifecycle per workload in sidecar mode; lower per-workload overhead in Ambient where L7 waypoints are selective. | Proxy resources and lifecycle per meshed workload, plus Consul control-plane/catalog operations. | Cilium agents and eBPF state per node. No per-workload proxy for the L3/L4 path; add proxies only where L7 features are needed. |
 
-Your original observation is correct for **Istio sidecar mode and Consul**:
-the client-local proxy receives endpoint and policy configuration, then makes
-the outbound routing/load-balancing decision. In Cilium's normal L3/L4 path,
-the node's eBPF Service map makes that decision using state that Cilium has
-already synchronized locally. The application pod does not hold a proxy.
+In **Istio sidecar mode and Consul**, a client-local proxy receives endpoint
+and policy configuration, then makes the outbound routing and load-balancing
+decision. In Cilium's normal L3/L4 path, the node's eBPF Service map makes
+that decision using state that Cilium has already synchronized locally. The
+application pod does not contain a proxy.
 
 There are two important caveats:
 
@@ -110,18 +110,19 @@ There are two important caveats:
    needed. It narrows the operational gap, but it is still a proxy-based data
    plane rather than Cilium's eBPF Service datapath.
 2. Cilium ClusterMesh is not a drop-in replacement for all Istio or Consul
-   features. This lab provides sidecarless L3/L4 connectivity, policy,
-   WireGuard transport encryption, and cross-cluster service discovery. Add
-   Cilium L7 features or a dedicated mesh when you need application mTLS,
-   request-level retries, weighted traffic shifting, circuit breaking, or
-   advanced request-aware routing.
+   features. The configuration provides sidecarless L3/L4 connectivity,
+   policy, WireGuard transport encryption, and cross-cluster service discovery.
+   Application mTLS, request-level retries, weighted traffic shifting, circuit
+   breaking, and advanced request-aware routing require Cilium L7 features or
+   a dedicated mesh.
 
 ### Consolidate the network datapath
 
 Cilium can provide the CNI, kube-proxy replacement, NetworkPolicy,
 encryption, Service load-balancing, Hubble observability, Gateway API, and
 multi-cluster connectivity. The goal is not to enable every feature by
-default, but to avoid maintaining several overlapping datapaths for this lab.
+default, but to avoid maintaining several overlapping datapaths in the
+configuration.
 
 ## What the lab creates
 
@@ -241,7 +242,7 @@ kubectl --context cluster-1 -n kube-system exec ds/cilium -- \
 
 ## Production considerations
 
-- This lab stores the shared ClusterMesh CA private key in Terraform state.
+- The example stores the shared ClusterMesh CA private key in Terraform state.
   Use an organization-controlled CA or AWS Private CA with cert-manager for
   production, and share trust roots rather than server or client private keys.
 - Keep node, pod, and service ranges unique across all connected clusters.
