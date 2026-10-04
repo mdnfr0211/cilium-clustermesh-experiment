@@ -1,0 +1,16 @@
+# Apply to cluster-2. Shares its existing nginx pods under the same global
+# Service name that cluster-1's Cilium Ingress uses.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress-remote
+  namespace: test-mesh
+  annotations:
+    service.cilium.io/global: "true"
+spec:
+  selector:
+    app: nginx
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80

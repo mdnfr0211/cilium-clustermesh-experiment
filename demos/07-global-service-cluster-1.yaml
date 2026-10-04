@@ -1,0 +1,43 @@
+# Apply to cluster-1. The Service name and namespace must match cluster-2.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: global-echo
+  namespace: test-mesh
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: global-echo
+  template:
+    metadata:
+      labels:
+        app: global-echo
+    spec:
+      containers:
+        - name: nginx
+          image: public.ecr.aws/nginx/nginx:alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo 'served-by=cluster-1' > /usr/share/nginx/html/index.html
+              exec nginx -g 'daemon off;'
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: global-echo
+  namespace: test-mesh
+  annotations:
+    service.cilium.io/global: "true"
+    service.cilium.io/affinity: "none"
+spec:
+  selector:
+    app: global-echo
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80

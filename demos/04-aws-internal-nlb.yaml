@@ -1,0 +1,47 @@
+# Apply to cluster-1. AWS Load Balancer Controller owns this internal NLB.
+# This is an AWS exposure demo, not a Cilium L2 announcement.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nlb-web
+  namespace: test-mesh
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nlb-web
+  template:
+    metadata:
+      labels:
+        app: nlb-web
+    spec:
+      containers:
+        - name: nginx
+          image: public.ecr.aws/nginx/nginx:alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "nlb-web=cluster-1 pod=$HOSTNAME" > /usr/share/nginx/html/index.html
+              exec nginx -g 'daemon off;'
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nlb-web
+  namespace: test-mesh
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: instance
+    service.beta.kubernetes.io/aws-load-balancer-target-group-attributes: preserve_client_ip.enabled=false
+spec:
+  type: LoadBalancer
+  loadBalancerClass: service.k8s.aws/nlb
+  selector:
+    app: nlb-web
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80

@@ -1,35 +1,27 @@
-apiVersion: apps/v1
-kind: Deployment
+# Apply to cluster-1. This is an internet egress policy, independent of
+# ClusterMesh's private DNS and the peer-cluster control-plane connection.
+apiVersion: v1
+kind: Pod
 metadata:
-  name: external-client
+  name: fqdn-client
   namespace: test-mesh
   labels:
-    app: external-client
+    app: fqdn-client
 spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: external-client
-  template:
-    metadata:
-      labels:
-        app: external-client
-    spec:
-      containers:
-        - name: curl
-          image: ubuntu:latest
-          command: ["sleep", "3600"]
-
+  containers:
+    - name: curl
+      image: curlimages/curl:8.12.1
+      command: ["sleep", "infinity"]
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: fqdn-egress-allowlist
+  name: fqdn-client-allow-github-api
   namespace: test-mesh
 spec:
   endpointSelector:
     matchLabels:
-      app: external-client
+      app: fqdn-client
   egress:
     - toEndpoints:
         - matchLabels:
@@ -43,17 +35,10 @@ spec:
               protocol: TCP
           rules:
             dns:
-              - matchName: "api.github.com"
-              - matchName: "kubernetes.io"
-              - matchName: "raw.githubusercontent.com"
-
+              - matchName: api.github.com
     - toFQDNs:
-        - matchName: "api.github.com"
-        - matchName: "kubernetes.io"
-        - matchName: "raw.githubusercontent.com"
+        - matchName: api.github.com
       toPorts:
         - ports:
             - port: "443"
-              protocol: TCP
-            - port: "80"
               protocol: TCP

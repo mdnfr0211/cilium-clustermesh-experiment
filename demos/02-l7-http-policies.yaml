@@ -1,52 +1,58 @@
+# Apply to cluster-2. Only GET /health from cluster-1's mesh-client is allowed.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: api-server
+  name: http-api
   namespace: test-mesh
-  labels:
-    app: api-server
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: api-server
+      app: http-api
   template:
     metadata:
       labels:
-        app: api-server
+        app: http-api
     spec:
       containers:
         - name: nginx
-          image: nginx:alpine
+          image: public.ecr.aws/nginx/nginx:alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo healthy > /usr/share/nginx/html/health
+              exec nginx -g 'daemon off;'
           ports:
             - containerPort: 80
-
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: api-server
+  name: http-api
   namespace: test-mesh
 spec:
   selector:
-    app: api-server
+    app: http-api
   ports:
-    - port: 80
-
+    - name: http
+      port: 80
+      targetPort: 80
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: api-server-l7-http-rules
+  name: http-api-allow-health
   namespace: test-mesh
 spec:
   endpointSelector:
     matchLabels:
-      app: api-server
+      app: http-api
   ingress:
     - fromEndpoints:
         - matchLabels:
-            app: frontend
+            app: mesh-client
+            io.cilium.k8s.policy.cluster: cluster-1
       toPorts:
         - ports:
             - port: "80"
@@ -54,23 +60,4 @@ spec:
           rules:
             http:
               - method: GET
-                path: "/api/health"
-              - method: GET
-                path: "/api/users"
-
----
-apiVersion: cilium.io/v2
-kind: CiliumClusterwideNetworkPolicy
-metadata:
-  name: global-deny-delete-methods
-spec:
-  description: "Deny DELETE HTTP method globally across the cluster"
-  endpointSelector: {}
-  ingress:
-    - toPorts:
-        - ports:
-            - port: "80"
-              protocol: TCP
-          rules:
-            http:
-              - method: DELETE
+                path: /health

@@ -250,6 +250,7 @@ module "node_security_group" {
     { description = "Cilium WireGuard from ${var.peer_cluster_name} nodes", protocol = "udp", from_port = 51871, to_port = 51871, cidr_blocks = var.peer_vpc_cidr },
     { description = "ClusterMesh KVStoreMesh + NLB health probes from ${var.peer_cluster_name}", protocol = "tcp", from_port = 2379, to_port = 2379, cidr_blocks = var.peer_vpc_cidr },
     { description = "clustermesh-apiserver NLB health probes from own VPC", protocol = "tcp", from_port = 2379, to_port = 2379, cidr_blocks = var.vpc_cidr },
+    { description = "Demo NLB and Ingress NodePorts from own VPC", protocol = "tcp", from_port = 30000, to_port = 32767, cidr_blocks = var.vpc_cidr },
     { description = "Cilium node health probes (TCP 4240) from ${var.peer_cluster_name}", protocol = "tcp", from_port = 4240, to_port = 4240, cidr_blocks = var.peer_vpc_cidr },
     { description = "Cilium node health probes (UDP 4240) from ${var.peer_cluster_name}", protocol = "udp", from_port = 4240, to_port = 4240, cidr_blocks = var.peer_vpc_cidr },
     { description = "Cilium node health probes (ICMP) from ${var.peer_cluster_name}", protocol = "icmp", from_port = -1, to_port = -1, cidr_blocks = var.peer_vpc_cidr },
