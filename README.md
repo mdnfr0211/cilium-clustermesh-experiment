@@ -217,6 +217,8 @@ Terraform creates the network, installs Cilium and its dependencies, creates
 the ClusterMesh API Services, waits for the NLB hostnames, and creates the
 private Route 53 records. It does not require a separate bootstrap apply,
 manual NLB edit, Helm post-renderer, or `kubectl patch`.
+The managed node groups and Cilium bootstrap together; CoreDNS, EBS CSI,
+and the controller add-ons are installed after Cilium and the nodes are ready.
 
 ### Verify
 

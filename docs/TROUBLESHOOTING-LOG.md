@@ -127,6 +127,21 @@ the NLB path.
 The NLB no longer requires the initial return flow to traverse an already
 established mesh.
 
+## 10. EKS add-ons started before the Cilium CNI
+
+**Symptom:** During a fresh apply, CoreDNS and EBS CSI appeared before Cilium
+and became `DEGRADED` with no nodes available to schedule their pods.
+
+**Cause:** The Cilium Helm release depended on the entire EKS Blueprints
+add-ons module. Terraform therefore installed add-ons before it could install
+the CNI they need. A managed node group also cannot be used as a strict
+prerequisite for Cilium: without a CNI, its nodes may not become Ready.
+
+**Resolution:** Start Cilium and managed node-group creation after the EKS
+control plane, in parallel. Wait for Cilium and the node groups before
+installing the add-ons. The node groups wait for their API security-group
+rule before creation.
+
 ## Current design checks
 
 - Node-to-node security group rules allow VXLAN (`8472/udp`), WireGuard

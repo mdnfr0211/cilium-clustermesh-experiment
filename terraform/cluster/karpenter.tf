@@ -1,13 +1,13 @@
 resource "kubectl_manifest" "karpenter_node_class" {
   yaml_body = yamlencode({
-    apiVersion = "karpenter.k8s.aws/v1beta1"
+    apiVersion = "karpenter.k8s.aws/v1"
     kind       = "EC2NodeClass"
     metadata = {
       name = "mesh"
     }
     spec = {
-      amiFamily = "AL2023"
-      role      = module.eks_blueprints_addons.karpenter.node_iam_role_name
+      amiSelectorTerms = [{ alias = "al2023@latest" }]
+      role             = module.eks_blueprints_addons.karpenter.node_iam_role_name
       subnetSelectorTerms = [{
         tags = {
           "karpenter.sh/discovery" = var.cluster_name
@@ -26,20 +26,25 @@ resource "kubectl_manifest" "karpenter_node_class" {
 
 resource "kubectl_manifest" "karpenter_node_pool" {
   yaml_body = yamlencode({
-    apiVersion = "karpenter.sh/v1beta1"
+    apiVersion = "karpenter.sh/v1"
     kind       = "NodePool"
     metadata = {
-      name     = "mesh"
-      workload = "mesh"
+      name = "mesh"
     }
     spec = {
       template = {
+        metadata = {
+          labels = { workload = "mesh" }
+        }
         spec = {
           nodeClassRef = {
-            name = "mesh"
+            group = "karpenter.k8s.aws"
+            kind  = "EC2NodeClass"
+            name  = "mesh"
           }
           requirements = [
             { key = "kubernetes.io/arch", operator = "In", values = ["amd64"] },
+            { key = "kubernetes.io/os", operator = "In", values = ["linux"] },
             { key = "karpenter.sh/capacity-type", operator = "In", values = ["on-demand"] },
             { key = "node.kubernetes.io/instance-type", operator = "In", values = ["c7i-flex.large", "m7i-flex.large"] },
           ]
@@ -50,7 +55,8 @@ resource "kubectl_manifest" "karpenter_node_pool" {
         memory = "200Gi"
       }
       disruption = {
-        consolidationPolicy = "WhenUnderutilized"
+        consolidationPolicy = "WhenEmptyOrUnderutilized"
+        consolidateAfter    = "1m"
       }
     }
   })

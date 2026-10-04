@@ -80,7 +80,7 @@ module "cluster_2" {
   aws_region               = var.aws_region
   ca_cert_pem              = tls_self_signed_cert.clustermesh_ca.cert_pem
   ca_key_pem               = tls_private_key.clustermesh_ca.private_key_pem
-  cilium_wait              = false
+  cilium_wait              = true
   cluster_id               = 2
   cluster_name             = local.cluster_2.name
   cluster_version          = local.cluster_2.kubernetes_version
