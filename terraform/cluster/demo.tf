@@ -62,8 +62,6 @@ resource "kubectl_manifest" "nginx_global_service" {
       namespace: test-mesh
       annotations:
         service.cilium.io/global: "true"
-        # With two clusters, "remote" makes this same Service name select the
-        # peer cluster's endpoints. This makes the connectivity demo explicit.
         service.cilium.io/affinity: "${var.nginx_service_affinity}"
     spec:
       type: ClusterIP

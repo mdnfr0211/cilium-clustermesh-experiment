@@ -69,7 +69,21 @@ resource "helm_release" "cilium" {
   version = "1.20.0"
   wait    = var.cilium_wait
 
-  depends_on = [module.eks_blueprints_addons]
+  # Install while node groups are joining: they need a CNI to become Ready.
+  depends_on = [module.eks]
+}
+
+resource "helm_release" "karpenter_crd" {
+  name             = "karpenter-crd"
+  namespace        = "karpenter"
+  create_namespace = true
+  chart            = "karpenter-crd"
+  repository       = "oci://public.ecr.aws/karpenter"
+  version          = local.karpenter_version
+  take_ownership   = true
+  wait             = true
+
+  depends_on = [helm_release.cilium]
 }
 
 resource "kubernetes_service_v1" "clustermesh_apiserver" {
@@ -164,6 +178,10 @@ module "eks_blueprints_addons" {
   cluster_endpoint = module.eks.cluster_endpoint
   cluster_name     = module.eks.cluster_name
   cluster_version  = module.eks.cluster_version
+  create_delay_dependencies = concat(
+    [helm_release.cilium.id, helm_release.karpenter_crd.id],
+    [for node_group in module.eks_managed_node_group : node_group.node_group_id],
+  )
   eks_addons = {
     coredns = {
       most_recent = true
@@ -185,7 +203,15 @@ module "eks_blueprints_addons" {
   enable_aws_load_balancer_controller = true
   enable_karpenter                    = true
   karpenter = {
+    chart_version       = local.karpenter_version
     repository_username = "AWS"
+    skip_crds           = true
+    wait                = true
+    policy_statements = [{
+      sid       = "DescribeInstanceStatus"
+      actions   = ["ec2:DescribeInstanceStatus"]
+      resources = ["*"]
+    }]
   }
   karpenter_enable_spot_termination = true
   karpenter_node = {
@@ -193,7 +219,6 @@ module "eks_blueprints_addons" {
   }
   oidc_provider_arn = module.eks.oidc_provider_arn
 
-  depends_on = [module.eks]
 }
 
 module "eks_managed_node_group" {
@@ -204,6 +229,7 @@ module "eks_managed_node_group" {
   cluster_name                      = module.eks.cluster_name
   cluster_primary_security_group_id = module.eks.cluster_primary_security_group_id
   cluster_service_cidr              = module.eks.cluster_service_cidr
+  kubernetes_version                = module.eks.cluster_version
   desired_size                      = 1
   disk_size                         = 20
   instance_types                    = var.node_instance_types
@@ -219,6 +245,8 @@ module "eks_managed_node_group" {
     max_unavailable_percentage = 100
   }
   vpc_security_group_ids = [module.eks.node_security_group_id]
+
+  depends_on = [aws_security_group_rule.cluster_nodes_443]
 }
 
 module "iam_role_ebs_csi" {
@@ -232,9 +260,6 @@ module "iam_role_ebs_csi" {
       provider_arn               = module.eks.oidc_provider_arn
       namespace_service_accounts = ["kube-system:ebs-csi-controller-sa"]
     }
-  }
-  policies = {
-    EC2FullAccess = "arn:aws:iam::aws:policy/AmazonEC2FullAccess"
   }
 }
 
