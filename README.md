@@ -179,7 +179,7 @@ map makes it from state that Cilium has already synchronized.
 | Area | Resources and responsibility |
 | --- | --- |
 | Clusters | Two EKS clusters in separate VPCs within one AWS account |
-| Pod network | Cilium cluster-pool IPAM, VXLAN, kube-proxy replacement, WireGuard, Hubble, and Gateway API |
+| Pod network | Cilium cluster-pool IPAM, VXLAN, kube-proxy replacement, WireGuard, Hubble, Gateway API, and Ingress controller |
 | Underlay | VPC peering, routes, and node security-group rules for ClusterMesh and node-to-node traffic |
 | Mesh control plane | A `clustermesh-apiserver` in each cluster and an internal instance-mode NLB on TCP/2379 |
 | TLS and discovery | A shared lab CA and a Route 53 private zone, `mesh.cilium.io`, associated with both VPCs |
@@ -189,6 +189,8 @@ map makes it from state that Cilium has already synchronized.
 The root Terraform module owns the lab CA, VPC peering, routes, and private
 hosted zone. Both clusters use the reusable
 [`terraform/cluster`](terraform/cluster) module.
+Additional, independently applied examples are documented in
+[`demos/README.md`](demos/README.md).
 
 ## How to deploy
 
@@ -228,7 +230,7 @@ aws eks update-kubeconfig --region ap-south-1 --name cluster-2 --alias cluster-2
 Check ClusterMesh convergence:
 
 ```sh
-kubectl --context cluster-1 -n kube-system exec ds/cilium -- \
+kubectl --context cluster-1 -n cilium exec ds/cilium -- \
   cilium-dbg clustermesh status --wait
 ```
 

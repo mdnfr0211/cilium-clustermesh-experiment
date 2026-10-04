@@ -21,8 +21,6 @@ clustermesh:
       auto:
         method: helm
     service:
-      # Terraform owns the Service so it can wait for the NLB hostname and
-      # supply it directly to the private Route53 module.
       externallyCreated: true
   config:
     enabled: true
@@ -32,8 +30,8 @@ dnsProxy:
   enabled: true
 
 ingressController:
-  enabled: false
-  default: true
+  enabled: true
+  default: false
 
 gatewayAPI:
   enabled: true
