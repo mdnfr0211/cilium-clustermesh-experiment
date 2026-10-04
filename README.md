@@ -1,280 +1,239 @@
 # Cilium ClusterMesh on Amazon EKS
 
-This Terraform lab creates two EKS clusters connected with Cilium
-ClusterMesh. It is intended to explore a different Kubernetes networking
-model: pod addressing is decoupled from VPC addressing, service routing and
-policy use an eBPF datapath rather than large iptables chains, traffic between
-nodes is encrypted, and remote Service backends can be selected without a
-sidecar in every application pod.
+## Overview
 
-## Architecture
+This Terraform lab connects two Amazon EKS clusters with Cilium ClusterMesh.
+Each cluster has its own VPC and pod network. The demo runs an `nginx`
+Service in both clusters; a client in either cluster can use the same
+Kubernetes Service name to reach an `nginx` pod in the other cluster.
 
-```mermaid
-flowchart TB
-  TF[Terraform root module]
-  CA[Shared ClusterMesh CA]
-  DNS[Route53 private zone<br/>mesh.cilium.io]
+The lab explores four questions: how to give pods addresses without consuming
+VPC IPs for every pod, how eBPF handles Kubernetes Service traffic, how
+WireGuard encrypts traffic between nodes, and how ClusterMesh makes remote
+pods and Services visible without a proxy in each application pod.
 
-  TF --> CA
-  TF --> DNS
+## What is Cilium?
 
-  subgraph VPC1[Cluster-1 VPC 10.0.0.0/16]
-    direction TB
-    NLB1[Internal NLB<br/>TCP 2379]
-    subgraph EKS1[cluster-1 EKS]
-      CM1[ClusterMesh state sync<br/>and API server]
-      BPF1[Cilium eBPF datapath<br/>Service and policy maps]
-      POD1[mesh-client pod]
-    end
-    NLB1 --> CM1
-    POD1 -->|nginx.test-mesh.svc.cluster.local| BPF1
-  end
+Cilium is a Kubernetes networking system. It acts as the cluster's Container
+Network Interface (CNI): the component that gives pods IP addresses and
+connects them to other pods and Services. A `cilium-agent` runs on every
+worker node and programs eBPF, which is code executed in the node's Linux
+kernel. The agent sets up routing, Service load balancing, and network
+policy; an application packet follows the programmed kernel rules without
+going through the agent container for every request.
 
-  subgraph VPC2[Cluster-2 VPC 10.1.0.0/16]
-    direction TB
-    NLB2[Internal NLB<br/>TCP 2379]
-    subgraph EKS2[cluster-2 EKS]
-      CM2[ClusterMesh state sync<br/>and API server]
-      BPF2[Cilium eBPF datapath<br/>Service and policy maps]
-      POD2[nginx pod]
-    end
-    NLB2 --> CM2
-    BPF2 --> POD2
-  end
+In this lab, Cilium is used for:
 
-  CA --> CM1
-  CA --> CM2
-  DNS -->|cluster-1.mesh.cilium.io| NLB1
-  DNS -->|cluster-2.mesh.cilium.io| NLB2
-
-  CM1 -->|mTLS state sync<br/>via cluster-2 NLB| NLB2
-  CM2 -->|mTLS state sync<br/>via cluster-1 NLB| NLB1
-  BPF1 -->|direct application traffic<br/>VXLAN + WireGuard| BPF2
-```
-
-The diagram shows the deliberate split between the two runtime paths:
-
-- **ClusterMesh control plane:** private DNS, internal NLBs, TCP/2379, and
-  mutual TLS synchronize remote identities, nodes, and endpoints.
-- **Application data plane:** Cilium's eBPF datapath sends ordinary service
-  traffic directly between nodes through VXLAN and WireGuard. The NLB is never
-  part of the application request path.
-
-## Why Cilium
-
-### Decouple pod capacity from VPC address capacity
-
-The AWS VPC CNI normally assigns pod addresses from the VPC. That is simple,
-but large or dense clusters can consume VPC secondary IP capacity quickly.
-
-The configuration uses Cilium cluster-pool IPAM and VXLAN. Nodes keep their VPC
-addresses, while pods use Cilium-managed ranges:
+- **Pod addresses:** cluster-pool IP address management (IPAM) allocates pod
+  IPs from ranges separate from the Amazon VPC subnets. A VPC is the private
+  network that holds the worker nodes. Nodes still use VPC IPs. The VPC,
+  pod, and Service ranges must remain unique and non-overlapping across the
+  connected clusters.
+- **Service routing and policy:** Cilium replaces kube-proxy's iptables
+  Service path with eBPF lookup and load balancing. eBPF is also used for
+  network policy and flow visibility.
+- **Encryption:** WireGuard encrypts node-to-node traffic, including the
+  cross-cluster pod traffic in this configuration. It protects transport
+  between nodes; it does not provide application-level mTLS.
+- **ClusterMesh:** Cilium shares the information needed to recognize remote
+  pods and select remote Service backends. This primarily handles IP
+  connectivity and TCP/UDP traffic (layers 3 and 4); features such as
+  request retries and HTTP routing need application-layer components.
 
 | Cluster | VPC CIDR | Pod CIDR |
 | --- | --- | --- |
 | `cluster-1` | `10.0.0.0/16` | `10.2.0.0/16` |
 | `cluster-2` | `10.1.0.0/16` | `10.3.0.0/16` |
 
-That means pod capacity can be planned independently of VPC secondary IP
-capacity. It does not remove the need for network design: VPC, node, pod, and
-service ranges must be unique and non-overlapping, and nodes in all connected
-clusters must be able to reach each other.
+## Architecture
 
-### Move service routing and policy away from iptables
+![Two EKS clusters exchanging ClusterMesh state through internal NLBs](assets/clustermesh-architecture.png)
 
-Kubernetes service routing and policy enforcement have traditionally relied
-heavily on iptables. As the number of Services and endpoints grows, those
-chains grow too and their update and debugging model becomes part of normal
-operations.
+The picture shows the **state-sharing path**: each cluster exposes its
+ClusterMesh etcd through an internal Network Load Balancer (NLB). The VPCs
+are connected by peering so the clusters can reach each other's NLB and
+worker nodes. The NLB carries ClusterMesh control traffic on TCP/2379.
 
-Cilium attaches eBPF programs to the Linux datapath. With
-`kubeProxyReplacement: true`, the configuration uses Cilium for Service
-load-balancing, policy enforcement, and flow visibility instead of using
-kube-proxy's iptables rules. eBPF is not a blanket performance guarantee for
-every workload; it is an architectural change that removes iptables as the
-primary dependency for these networking functions.
+There is a second path that is easier to miss in the picture: application
+packets travel directly between worker nodes, through the Cilium datapath.
+They do not pass through the ClusterMesh etcd or NLB. The arrows between the
+Kubernetes API and workloads represent cluster state, not application packet
+forwarding. The next section walks through both paths.
 
-### Encrypt traffic and enforce policy by workload identity
+## ClusterMesh
 
-The lab enables Cilium WireGuard node encryption. Cilium establishes encrypted
-tunnels between known nodes; remote pod traffic is VXLAN-encapsulated and then
-encrypted while crossing the VPC network.
+ClusterMesh lets Cilium in one cluster learn about selected pods, identities,
+nodes, and Services in another cluster. It has two stages: first share the
+state, then use that state when forwarding packets.
 
-Cilium also supplies one place to enforce Kubernetes and Cilium network policy
-using workload identities and labels. Through ClusterMesh, that model extends
-to remote endpoints in shared namespaces.
+### Flow 1: share state between clusters
 
-WireGuard protects traffic in transit between nodes. It is not application
-mTLS and does not replace application-level authentication or authorization.
+Every cluster runs a `clustermesh-apiserver` pod with three containers. Here,
+etcd is a small key-value database: it stores networking information as keys
+and values that other Cilium components can watch for changes.
 
-### Connect clusters without a per-workload sidecar
+| Container | What it does |
+| --- | --- |
+| `apiserver` | Watches the local Kubernetes API and Cilium state, then publishes the local cluster's shareable state to its ClusterMesh etcd. |
+| `etcd` | Stores the local state exposed to peers and the remote state cached by `kvstoremesh`. This is a separate, embedded etcd instance; it is **not** the etcd behind the EKS Kubernetes API. |
+| `kvstoremesh` | Watches configured peer clusters' etcd instances and copies their shared state into the local etcd cache. |
 
-With a traditional sidecar mesh, each workload pod gets a local proxy that
-intercepts traffic and receives destination information from the mesh control
-plane. This is powerful, but it adds a proxy lifecycle, CPU and memory use,
-an upgrade surface, and a troubleshooting hop to every application pod.
+When a new `nginx` pod starts in `cluster-2`, the sequence is:
 
-For L3/L4 traffic, Cilium performs service selection and routing in the eBPF
-datapath on each node. ClusterMesh synchronizes remote nodes, identities,
-endpoints, and Service backends, so the local node can select a remote pod
-using the same Service lookup that it uses for a local pod.
+1. Kubernetes records the pod and its endpoint information. Cilium learns
+   about the pod in `cluster-2`.
+2. The `apiserver` container in `cluster-2` watches the Kubernetes API and
+   Cilium state and writes the information that can be shared to
+   `cluster-2`'s embedded etcd. The Kubernetes API does not write directly
+   to this etcd.
+3. `cluster-1`'s `kvstoremesh` is already watching `cluster-2`'s etcd.
+   Its connection goes through `cluster-2.mesh.cilium.io`, the internal
+   NLB, and a NodePort on a worker node. Kubernetes forwards that NodePort
+   traffic through the ClusterMesh Service to the etcd container in the
+   `clustermesh-apiserver` pod.
+4. `kvstoremesh` receives the new state and saves a local copy in
+   `cluster-1`'s embedded etcd. `cluster-1`'s Cilium agents read that
+   local copy and learn which remote node and pod can serve the request.
 
-```text
-client pod in cluster-1
-  -> nginx.test-mesh.svc.cluster.local
-  -> Cilium Service lookup in eBPF
-  -> a cluster-2 nginx endpoint
-  -> VXLAN + WireGuard between nodes
-  -> destination pod
-```
+The connection between `kvstoremesh` and remote etcd is long-lived and uses
+mutual TLS (mTLS). The NLB forwards TCP/2379; the etcd container handles the
+TLS connection. The private Route 53 names match the certificate's
+`*.mesh.cilium.io` name, whereas the AWS-generated NLB hostnames do not.
+The NLB target group disables client IP preservation so its replies use the
+node-network return path during mesh startup.
 
-This does not mean every L7 service-mesh feature is free. Cilium can use
-Envoy-based proxies for HTTP, gRPC, DNS, Gateway API, and ingress features
-that require L7 parsing. The distinction is that ordinary pod-to-pod and
-Service traffic does not require a sidecar in every application pod.
+### Flow 2: send a request from one pod to another
 
-### The precise comparison: Istio, Consul, and Cilium
+Each local Cilium agent takes the endpoint information from Flow 1 and
+programs Service and routing maps in its node's kernel. The application pods
+never connect to etcd themselves.
 
-The useful comparison is not “proxy versus no proxy.” These tools overlap, but
-they start at different layers and make different default trade-offs:
+In this demo, both clusters have a global `nginx` Service in the
+`test-mesh` namespace. A **global Service** combines eligible local and
+remote backends under the same Service name. The demo sets its affinity to
+`remote`, so the peer cluster is selected:
 
-| Concern | Istio | Consul service mesh | Cilium + ClusterMesh in this configuration |
+1. The `mesh-client` pod in `cluster-1` requests
+   `nginx.test-mesh.svc.cluster.local`. Kubernetes DNS returns its local
+   Service IP.
+2. The source node's Cilium eBPF Service map translates that virtual Service
+   IP to an `nginx` pod IP in `cluster-2`. The map already contains the
+   remote endpoint learned in Flow 1.
+3. Cilium sends the packet across the worker-node network using VXLAN, which
+   wraps the pod packet for transport between nodes, and WireGuard, which
+   encrypts the node-to-node traffic. The VPC peering carries it to the
+   destination node.
+4. Cilium on the `cluster-2` node delivers the packet to the selected
+   `nginx` pod. The reply follows the corresponding network path.
+
+The pod request uses information obtained from etcd earlier; it does not
+query etcd, Route 53, or the NLB for each request. The `cilium-agent`
+programs the kernel maps, while the kernel handles the packets.
+
+### What if there are 100 clusters?
+
+In a **full mesh** of 100 clusters, each cluster's `kvstoremesh` connects to
+the other 99 clusters and continuously watches their shared state. It keeps
+a copy of that remote state in its own etcd. That is 9,900 directional
+cluster-to-cluster relationships in total (`100 × 99`); the number of
+individual etcd watch streams and TCP connections is an implementation
+detail. Local Cilium agents use the local cache instead of each opening 99
+remote connections.
+
+A **partial mesh** configures each cluster with only the peers it needs.
+That reduces the remote connections and the state copied into each cluster,
+but a cluster can only use remote endpoints and Services from peers whose
+state it receives. The network path for pod traffic must also exist between
+those peers. This lab configures the two clusters as mutual peers.
+
+Cilium supports up to 255 connected clusters by default, or 511 with a
+smaller cluster-local identity space. The choice must be consistent across
+the mesh and is difficult to change after installation. A 100-cluster
+design should also consider how much endpoint and identity state is exported
+and whether all clusters need to share one trust domain. See Cilium's
+[architecture](https://docs.cilium.io/en/stable/network/clustermesh/intro/)
+and [scaling guidance](https://docs.cilium.io/en/stable/network/clustermesh/setup/#scaling-limitations).
+
+## Comparison
+
+Istio, Consul, and Cilium overlap, but they solve different parts of the
+service-to-service problem. This table describes the modes relevant to this
+lab rather than every feature of each product.
+
+| Question | Istio | Consul service mesh | Cilium and ClusterMesh in this lab |
 | --- | --- | --- | --- |
-| Primary role | A service mesh focused on secure, observable, and programmable service-to-service traffic. | Service discovery plus a service mesh that works across Kubernetes, VMs, and other runtimes. | A CNI and eBPF networking/security datapath; ClusterMesh extends its L3/L4 connectivity and Services across Kubernetes clusters. |
-| Default data plane | Either an Envoy sidecar beside each workload or Istio Ambient: a per-node L4 `ztunnel` plus optional L7 waypoint proxies. | Usually an Envoy sidecar beside each service. Consul dataplane can remove client agents, but it still manages a local proxy for the workload. | The Cilium agent runs per node. Ordinary pod and Kubernetes Service traffic is handled by eBPF; no proxy is injected into application pods. |
-| Traffic interception | Sidecar mode intercepts workload traffic through Envoy. Ambient moves the L4 hop to the node and adds a waypoint only for L7 needs. | Transparent proxy mode uses iptables to redirect inbound and outbound traffic through the sidecar Envoy. | With kube-proxy replacement, eBPF handles Service translation, load-balancing, and policy in the kernel datapath instead of kube-proxy iptables chains. |
-| Where endpoint state lives | Istiod discovers services, creates xDS configuration, and dynamically programs the Envoy proxies. | The Consul catalog/control plane provides Envoy xDS configuration, including upstream discovery, certificates, intentions, and L7 settings. | Kubernetes state plus KVStoreMesh remote state is programmed into each node's Cilium agent and its eBPF Service/endpoint maps. |
-| Who selects the backend | The local Envoy/ztunnel/waypoint, depending on Istio data-plane mode and feature used. | The local Envoy proxy chooses a healthy upstream backend. | The node eBPF datapath selects the local or remote pod backend for ordinary L3/L4 Service traffic. |
-| mTLS and authorization | Workload mTLS, identities, and authorization are core mesh features. | Workload mTLS is core: Consul issues or integrates certificates and Envoy enforces service intentions. | The configuration enables WireGuard **node-to-node** encryption and Cilium network policy. It does not enable workload application mTLS. ClusterMesh etcd has separate mTLS. |
-| L7 traffic management | Rich request-aware routing, retries, timeouts, fault injection, traffic splitting, and telemetry. | Envoy-based HTTP/gRPC routing, L7 intentions, timeouts, and traffic-management configuration. | Possible through Cilium's Envoy-based L7, Gateway API, and ingress features, but not supplied by ClusterMesh itself or enabled in this configuration. |
-| Multi-cluster model | Multiple control-plane and topology models; proxies receive remote service configuration. | Cluster peering or WAN federation, usually with mesh gateways for cross-network service traffic. | Direct remote pod connectivity, cluster-aware policy, and global Service backend sharing after KVStoreMesh syncs state. |
-| Main operational cost | Proxy resources and lifecycle per workload in sidecar mode; lower per-workload overhead in Ambient where L7 waypoints are selective. | Proxy resources and lifecycle per meshed workload, plus Consul control-plane/catalog operations. | Cilium agents and eBPF state per node. No per-workload proxy for the L3/L4 path; add proxies only where L7 features are needed. |
+| Where does routing happen? | An Envoy sidecar in sidecar mode; node-level `ztunnel` and optional waypoint proxies in Ambient mode. | Usually a local Envoy proxy beside each service. | The worker node's eBPF datapath selects a Service backend for ordinary L3/L4 traffic. |
+| Where does destination information go? | Istiod distributes configuration to the proxies. | The Consul control plane distributes configuration to Envoy. | ClusterMesh copies remote state locally; Cilium agents program node eBPF maps. |
+| Does each application pod need a proxy? | Yes in sidecar mode; no sidecar in Ambient mode. | Usually yes for transparent proxy mode. | No for the L3/L4 path in this lab. |
+| What encryption is shown here? | Workload mTLS is a core feature. | Workload mTLS is a core feature. | WireGuard between nodes; separate mTLS protects ClusterMesh etcd. Application mTLS is not enabled. |
+| What about HTTP-level features? | Rich HTTP routing, retries, and policy through proxies. | Envoy-based HTTP routing and policy. | Cilium can use Envoy for L7 features, but ClusterMesh alone does not supply these capabilities. |
+| How are multiple clusters connected? | Various multicluster topologies and proxy routing models. | Cluster peering or federation, commonly with mesh gateways. | ClusterMesh shares endpoint state; this lab forwards pod traffic directly between nodes. |
 
-In **Istio sidecar mode and Consul**, a client-local proxy receives endpoint
-and policy configuration, then makes the outbound routing and load-balancing
-decision. In Cilium's normal L3/L4 path, the node's eBPF Service map makes
-that decision using state that Cilium has already synchronized locally. The
-application pod does not contain a proxy.
-
-There are two important caveats:
-
-1. Istio is no longer only a sidecar mesh. Its Ambient mode moves L4 handling
-   to a per-node proxy and uses waypoint Envoys only where L7 functionality is
-   needed. It narrows the operational gap, but it is still a proxy-based data
-   plane rather than Cilium's eBPF Service datapath.
-2. Cilium ClusterMesh is not a drop-in replacement for all Istio or Consul
-   features. The configuration provides sidecarless L3/L4 connectivity,
-   policy, WireGuard transport encryption, and cross-cluster service discovery.
-   Application mTLS, request-level retries, weighted traffic shifting, circuit
-   breaking, and advanced request-aware routing require Cilium L7 features or
-   a dedicated mesh.
-
-### Consolidate the network datapath
-
-Cilium can provide the CNI, kube-proxy replacement, NetworkPolicy,
-encryption, Service load-balancing, Hubble observability, Gateway API, and
-multi-cluster connectivity. The goal is not to enable every feature by
-default, but to avoid maintaining several overlapping datapaths in the
-configuration.
+The useful distinction for this experiment is **where a backend is chosen**.
+With an Istio sidecar or a Consul proxy, the client-local proxy makes that
+choice. With Cilium's standard L3/L4 Service path, the node's eBPF Service
+map makes it from state that Cilium has already synchronized.
 
 ## What the lab creates
 
 | Area | Resources and responsibility |
 | --- | --- |
-| Clusters | Two EKS clusters, `cluster-1` and `cluster-2`, each in its own VPC |
+| Clusters | Two EKS clusters in separate VPCs within one AWS account |
 | Pod network | Cilium cluster-pool IPAM, VXLAN, kube-proxy replacement, WireGuard, Hubble, and Gateway API |
-| Underlay | VPC peering, routes, and node security-group rules for VXLAN, WireGuard, health checks, and ClusterMesh |
+| Underlay | VPC peering, routes, and node security-group rules for ClusterMesh and node-to-node traffic |
 | Mesh control plane | A `clustermesh-apiserver` in each cluster and an internal instance-mode NLB on TCP/2379 |
-| TLS and discovery | A shared lab CA and a Route53 private zone, `mesh.cilium.io`, associated with both VPCs |
+| TLS and discovery | A shared lab CA and a Route 53 private zone, `mesh.cilium.io`, associated with both VPCs |
 | AWS integration | AWS Load Balancer Controller, EBS CSI, and Karpenter through EKS Blueprints |
-| Demo | A global `nginx` Service and `mesh-client` pod in the `test-mesh` namespace |
+| Demo | A global `nginx` Service and `mesh-client` pod in the `test-mesh` namespace in each cluster |
 
-The root Terraform module owns shared infrastructure: the lab CA, VPC
-peering, routes, and private hosted zone. Both clusters are instances of the
-reusable [`terraform/cluster`](terraform/cluster) module.
+The root Terraform module owns the lab CA, VPC peering, routes, and private
+hosted zone. Both clusters use the reusable
+[`terraform/cluster`](terraform/cluster) module.
 
-## How ClusterMesh works here
-
-ClusterMesh has two separate traffic paths. Keeping them distinct is crucial.
-
-### Control plane: synchronize remote cluster state
-
-Before the mesh exists, one cluster cannot rely on the other cluster's pod
-network. Each cluster exposes `clustermesh-apiserver` behind an internal NLB
-that is reachable over the already-peered VPC node network.
-
-```text
-KVStoreMesh in cluster-1
-  -> resolve cluster-2.mesh.cilium.io
-  -> cluster-2 internal NLB, TCP/2379
-  -> NodePort and Kubernetes Service
-  -> cluster-2 clustermesh-apiserver / etcd
-```
-
-The NLB is TCP pass-through. Cilium's API server ends mutual TLS; the NLB does
-not terminate it.
-
-Private DNS is required because Cilium's serving certificate covers
-`*.mesh.cilium.io`, while an AWS-generated `*.elb.amazonaws.com` NLB hostname
-is not a certificate SAN. Route53 CNAME records provide stable,
-certificate-valid peer names even when an NLB is recreated.
-
-The NLB target group disables source-IP preservation. Otherwise, an initial
-connection could try to return through a remote overlay path before the
-reverse ClusterMesh state exists.
-
-### Data plane: send application traffic between nodes
-
-After KVStoreMesh synchronizes remote endpoint and identity information,
-Cilium programs each node's eBPF maps. Application packets do not traverse the
-NLB:
-
-```text
-client pod -> local node eBPF -> VXLAN -> WireGuard -> remote node eBPF -> nginx pod
-```
-
-The NLB exists only for ClusterMesh state synchronization, not application
-load-balancing.
-
-## Deploy
+## How to deploy
 
 ### Prerequisites
 
 - Terraform 1.0 or later
 - AWS CLI authenticated to the target AWS account
-- AWS permissions for EKS, EC2/VPC, IAM, Route53, and EKS add-on resources
-- `kubectl` for the optional post-deployment verification
+- AWS permissions for EKS, EC2/VPC, IAM, Route 53, and EKS add-ons
+- `kubectl` for verification
 
 The current Terraform provisions both clusters in **one AWS account**.
-ClusterMesh can span accounts, but that requires separate AWS provider
-credentials, requester/accepter VPC peering, routes in both accounts, and an
-authorized cross-account association to the Route53 private zone.
+Cross-account deployment would need separate AWS provider credentials,
+requester/accepter VPC peering, routes in both accounts, and cross-account
+authorization for the Route 53 private-zone association.
 
-### Apply everything
+### Apply
 
 ```sh
 terraform -chdir=terraform init
 terraform -chdir=terraform apply
 ```
 
-Terraform creates the underlay, installs Cilium and its dependencies, creates
+Terraform creates the network, installs Cilium and its dependencies, creates
 the ClusterMesh API Services, waits for the NLB hostnames, and creates the
-private Route53 records. No separate bootstrap apply, manual NLB edit, Helm
-post-renderer, or `kubectl patch` is required.
+private Route 53 records. It does not require a separate bootstrap apply,
+manual NLB edit, Helm post-renderer, or `kubectl patch`.
 
-## Verify cross-cluster Service connectivity
+### Verify
 
-Configure local contexts after the apply:
+Configure local Kubernetes contexts:
 
 ```sh
 aws eks update-kubeconfig --region ap-south-1 --name cluster-1 --alias cluster-1
 aws eks update-kubeconfig --region ap-south-1 --name cluster-2 --alias cluster-2
 ```
 
-Both clusters define a Service named `nginx` in the global `test-mesh`
-namespace. The Service is annotated as global, so Cilium shares backends
-across clusters. It also uses `service.cilium.io/affinity: remote`; in this
-two-cluster lab, `remote` means the peer cluster.
+Check ClusterMesh convergence:
+
+```sh
+kubectl --context cluster-1 -n kube-system exec ds/cilium -- \
+  cilium-dbg clustermesh status --wait
+```
+
+Then request the same Service name from each cluster. Because the demo uses
+`remote` affinity, each response should name the other cluster:
 
 ```sh
 kubectl --context cluster-1 -n test-mesh exec mesh-client -- \
@@ -286,36 +245,33 @@ kubectl --context cluster-2 -n test-mesh exec mesh-client -- \
 # served-by=cluster-1
 ```
 
-Verify that the ClusterMesh control plane has converged:
-
-```sh
-kubectl --context cluster-1 -n kube-system exec ds/cilium -- \
-  cilium-dbg clustermesh status --wait
-```
-
-## Production considerations
-
-- The example stores the shared ClusterMesh CA private key in Terraform state.
-  Use an organization-controlled CA or AWS Private CA with cert-manager for
-  production, and share trust roots rather than server or client private keys.
-- Keep node, pod, and service ranges unique across all connected clusters.
-- `remote` affinity is a two-cluster demonstration. Design locality, failure,
-  and traffic-steering behavior deliberately in a larger topology.
-- Review encryption mode, NetworkPolicies, IAM boundaries, observability, and
-  availability requirements before using this repository as a template.
-
-## Teardown
+### Teardown
 
 ```sh
 terraform -chdir=terraform destroy
 ```
 
+## Production considerations
+
+- The lab stores the shared ClusterMesh CA private key in Terraform state.
+  Use an organization-controlled CA or private PKI for production, and
+  distribute trust roots rather than sharing server or client private keys.
+- Keep VPC, node, pod, and Service CIDRs unique across connected clusters.
+- Design locality and failure behavior deliberately. The demo's `remote`
+  affinity is useful for proving cross-cluster access, not a general routing
+  policy for a large mesh.
+- Review network policy, IAM boundaries, encryption settings, observability,
+  and ClusterMesh availability before using this lab as a production template.
+- Treat connected clusters as one trust domain: a compromised Cilium control
+  plane in one cluster can affect state seen by its peers.
+
 ## References
 
-- [Cilium ClusterMesh overview](https://docs.cilium.io/en/stable/network/clustermesh/intro/)
-- [Cilium ClusterMesh setup](https://docs.cilium.io/en/stable/network/clustermesh/setup/)
+- [Cilium overview](https://docs.cilium.io/en/stable/overview/intro/)
+- [Cilium ClusterMesh architecture](https://docs.cilium.io/en/stable/network/clustermesh/intro/)
+- [Cilium ClusterMesh setup and scaling](https://docs.cilium.io/en/stable/network/clustermesh/setup/)
 - [Cilium Global Services](https://docs.cilium.io/en/stable/network/clustermesh/global-services/)
-- [Cilium transparent WireGuard encryption](https://docs.cilium.io/en/stable/security/network/encryption-wireguard/)
+- [Cilium WireGuard encryption](https://docs.cilium.io/en/stable/security/network/encryption-wireguard/)
 - [Cilium Service Mesh](https://docs.cilium.io/en/stable/network/servicemesh/)
 - [Istio architecture](https://istio.io/latest/docs/ops/deployment/architecture/)
 - [Istio sidecar and Ambient modes](https://istio.io/latest/docs/overview/dataplane-modes/)
