@@ -30,7 +30,7 @@ dnsProxy:
   enabled: true
 
 ingressController:
-  enabled: true
+  enabled: false
   default: false
 
 gatewayAPI:
